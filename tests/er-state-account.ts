@@ -35,6 +35,7 @@ describe("er-state-account", () => {
   });
 
   const program = anchor.workspace.erStateAccount as Program<ErStateAccount>;
+  const ephemeralProgram = new Program(program.idl, providerEphemeralRollup);
 
   const userAccount = anchor.web3.PublicKey.findProgramAddressSync(
     [Buffer.from("user"), anchor.Wallet.local().publicKey.toBuffer()],
@@ -65,6 +66,33 @@ describe("er-state-account", () => {
     console.log("\nUser Account State Updated: ", tx);
   });
 
+  // Test for base layer vrf request and callback
+  it("Base Layer: VRF Call", async () => {
+    const accountBefore = await program.account.userAccount.fetch(userAccount);
+    console.log("> Data before VRF", accountBefore.data.toString());
+
+    // Request randomness with client seed
+    const clientSeed = 42;
+    const tx = await program.methods
+      .requestRandomness(clientSeed)
+      .accountsPartial({
+        oracleQueue: new PublicKey(
+          "Cuj97ggrhhidhbu39TijNVqE74xvKJ69gDervRUXAxGh",
+        ),
+      })
+      .rpc();
+
+    console.log("> Base vrf call tx signature:", tx);
+    console.log("> Waiting for oracle to process and callback...");
+
+    // Wait 5 seconds for oracle to process
+    await new Promise((resolve) => setTimeout(resolve, 12000));
+
+    // Fetch updated account state after callback
+    const accountAfter = await program.account.userAccount.fetch(userAccount);
+    console.log("> Data after VRF", accountAfter.data.toString());
+  });
+
   it("Delegate to Ephemeral Rollup!", async () => {
     let tx = await program.methods
       .delegate()
@@ -77,6 +105,39 @@ describe("er-state-account", () => {
       .rpc({ skipPreflight: true });
 
     console.log("\nUser Account Delegated to Ephemeral Rollup: ", tx);
+  });
+
+  // Test for er layer vrf request and callback
+  it("ER Layer: VRF Call", async () => {
+    const clientSeed = 42;
+    // vrf call from er, needs program with magicblock er provider
+    let tx = await ephemeralProgram.methods
+      .requestRandomness(clientSeed)
+      .accountsPartial({
+        oracleQueue: new PublicKey(
+          "5hBR571xnXppuCPveTrctfTU7tJLSN94nq7kv7FRK5Tc",
+        ), // DEFAULT_QUEUE
+      })
+      .transaction();
+    tx.feePayer = providerEphemeralRollup.wallet.publicKey;
+    tx.recentBlockhash = (
+      await providerEphemeralRollup.connection.getLatestBlockhash()
+    ).blockhash;
+    tx = await providerEphemeralRollup.wallet.signTransaction(tx);
+    const txHash = await providerEphemeralRollup.sendAndConfirm(tx, [], {
+      skipPreflight: false,
+    });
+    console.log("> ER vrf call tx signature:", txHash);
+    console.log("> Waiting for oracle to process and callback...");
+    // Wait 5 seconds for oracle to process
+    await new Promise((resolve) => setTimeout(resolve, 12000));
+    // Fetch updated account state after callback
+    const accountAfter =
+      await providerEphemeralRollup.connection.getAccountInfo(userAccount);
+    if (accountAfter) {
+      const value = new anchor.BN(accountAfter.data.slice(40, 48), "le");
+      console.log("> Data after ER VRF", value.toString());
+    }
   });
 
   it("Update State and Commit to Base Layer!", async () => {
